@@ -1,0 +1,14 @@
+[package]
+name = "mcl-grid"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+nalgebra = "0.32.3"
+rusty-tree = "0.0.1"
+octree = { git = "https://github.com/WenqingZong/Octree", branch = "main" }
+bvh = "0.7.2"
+bvh-arena = "1.1.3"
+
