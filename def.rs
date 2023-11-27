@@ -35,7 +35,7 @@ impl Pose for RobotPose {
     fn dir(&self) -> Quaternion<f64> { self.2 }
 }
 
-/// Abstracts the grid-map. Is a 3D representation with the floor being the default height
+/// Abstracts the grid-map. Is a 3D representation with the floor being constant
 /// Allows updating for integration of data.
 trait GridMap {
     fn ray_probe(&self, ray: (&Vector3<u32>, &Vector3<f32>)) -> f64;
@@ -74,8 +74,7 @@ impl GridMap for OccupancyGrid {
     // insertion algorithms
     fn insert(&mut self, x: &RobotPose) {
         // TODO: Handle none 1:1 case
-        self.cells
-            .push(GridCell {
+        self.cells.push(GridCell {
             position: *x,
             significance: 0.3, // Reasonable initial probability
             node_index: None,
@@ -84,7 +83,7 @@ impl GridMap for OccupancyGrid {
     // Recall assumption of known position for particle filters
     fn update(&mut self, x: &RobotPose, u: &LaserImage) {
         // TODO: Handle none 1:1 case
-        u.integrate_into_map(x, self);
+        self.cells.
     }
 }
 
@@ -199,25 +198,15 @@ impl SampleControl for Imu {
 /// Simulates Pr(z,m|x,u)
 trait SampleMeasurement<M> {
     fn measurement_simulation(&self, x: &impl Pose, u: &impl Control) -> M;
-    // Choose to have the Measurement integrate itself into the map due to
-    // how much harder it'll be to reimplement an occupancy map due to changing
-    // measurement specifications.
-    fn integrate_into_map(&self, x: &impl Pose, z: &impl M, m: &impl Map);
 }
 
-struct LaserImage {
-    vfov: 100,
-    hfov: 50,
+struct LaserImage {}
 
-}
-
-impl<M> SampleMeasurement<M: Vec<u8>> for LaserImage {
+impl<M> SampleMeasurement<M> for LaserImage {
     fn measurement_simulation(&self, x: &RobotPose, u: &Imu) -> M {
 
     }
-    fn integrate_into_map(&self, x: &RobotPose, z: &impl M, m: &mut OccupancyGrid) {
 
-    }
 }
 
 trait Scaled<M> {
