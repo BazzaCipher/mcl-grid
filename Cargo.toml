@@ -11,4 +11,5 @@ rusty-tree = "0.0.1"
 octree = { git = "https://github.com/WenqingZong/Octree", branch = "main" }
 bvh = "0.7.2"
 bvh-arena = "1.1.3"
+bno055 = "0.3.3"
 
