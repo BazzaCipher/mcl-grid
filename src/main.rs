@@ -22,8 +22,9 @@ fn main() {
     println!("Hello, world!");
 }
 
+// TODO: Generic & Borrowed
 trait Pose {
-    fn xy(&self) -> Point3<f32>;
+    fn pos(&self) -> Point3<f32>;
     fn dir(&self) -> Rotation3<f32>;
 }
 
@@ -32,7 +33,7 @@ trait Pose {
 type RobotPose = Vector3<f32>;
 
 impl Pose for RobotPose {
-    fn xy(&self) -> Vector3<f32> {
+    fn pos(&self) -> Point3<f32> {
         Point3::new(self.0, self.1, DEFAULT_HEIGHT)
     }
     fn dir(&self) -> Rotation3<f32> { Rotation3::from_euler_angles(0, 0, self.2) }
@@ -41,7 +42,7 @@ impl Pose for RobotPose {
 /// Abstracts the grid-map. Is a 3D representation with the floor being the default height
 /// Allows updating for integration of data.
 trait GridMap {
-    fn ray_probe(&self, ray: (&Vector3<u32>, &Vector3<f32>)) -> f32;
+    fn ray_probe(&self, ray: (&Point3<f32>, &Vector3<f32>)) -> f32;
     fn insert(&mut self, x: &impl Pose);
     fn update(&mut self, x: &impl Pose, u: &impl SampleMeasurement);
 }
@@ -66,11 +67,11 @@ impl OccupancyGrid {
 
 // Do not assume 1:1 scale
 impl GridMap for OccupancyGrid {
-    fn ray_probe(&self, ray: (&Vector3<u32>, &Vector3<u32>)) -> Option<f32> {
+    fn ray_probe(&self, ray: (&Point3<u32>, &Vector3<u32>)) -> Option<f32> {
         // Should model behaviour of sensor (max dist etc)
-            let shapes = self.map.traverse_iterator(&Ray::new(vector3tovec3(ray.0), vector3tovec3(ray.1)), &self.cells);
+            let shapes = self.map.traverse_iterator(Ray::new(vector3tovec3(ray.0), vector3tovec3(ray.1)), &self.cells);
             shapes
-                .map(|shape| distance(shape.position.into(), ray.0)) // TODO: Compare f64 dists instead
+                .map(|shape| distance(shape.position.into(), ray.0) as i64) // TODO: Compare f64 dists instead
                 .min()
     }
     // Inefficient in that every time the map is updated, the BVH is rebuilt. Consider Fast
@@ -85,7 +86,7 @@ impl GridMap for OccupancyGrid {
         })
     }
     // Recall assumption of known position for particle filters
-    fn update(&mut self, x: &RobotPose, u: &LaserImage<const VFOV, const HFOV: usize>) {
+    fn update<const VFOV: usize, const HFOV: usize>(&mut self, x: &RobotPose, u: &LaserImage<VFOV, HFOV>) {
         // TODO: Handle none 1:1 case
         u.integrate_into_map(x, u);
     }
@@ -120,13 +121,13 @@ impl BHShape for GridCell {
 
 /// Contains the multimodal estimates, x, of the current pose/robot position
 /// as well as best estimate
-trait BeliefState<M> {
+trait BeliefState {
     /// From the theory, we have the prediction based on all previous controls
     /// and the current state and map (ex ante)
     fn predict(&mut self, u: Vec<&impl SampleControl>);
     /// Integration of actual measurements
     fn integrate(&mut self, am: &impl SampleMeasurement);
-    fn best_estimate(&self) -> &dyn Pose;
+    fn best_estimate(&self) -> Box<dyn Pose>; // TODO: Make Belief generic over Pose
 }
 
 struct Particles<const P: usize> {
@@ -137,7 +138,7 @@ struct Particles<const P: usize> {
     is_pred: bool,
 }
 
-impl<const P: usize, M> BeliefState<M> for Particles<P> {
+impl<const P: usize> BeliefState for Particles<P> {
     fn predict(&mut self, mut u: Vec<&Imu>) { 
         // We don't use any other than the latest due to integration into the map already
         // Might make it non-Vec because we could just save it into the map
@@ -145,9 +146,12 @@ impl<const P: usize, M> BeliefState<M> for Particles<P> {
 
         self.particles
             .iter_mut()
-            .map(|(pose, m)| u.motion_simulation(pose, m))
+            .map(|(pose, m)| u
+                 .expect("Empty robot control 'u' vector")
+                 .motion_simulation(pose, m)
+             );
     }
-    fn integrate(&mut self, am: &LaserImage<const VFOV: usize, >) { 
+    fn integrate<const VFOV: usize, const HFOV: usize>(&mut self, am: &LaserImage<VFOV, HFOV>) { 
         self.particles
             .iter_mut()
             .map(|(pose, m)| am.integrate_into_map(pose, m));
@@ -173,7 +177,7 @@ impl Imu {
     fn update(&mut self, t: f32) -> Result<(), BnoError<u8>> {
         // This model suffers from drift heavily; either KF or 120+Hz updates
         // TODO: Implement Kalman for integration of accelerations (VERY IMPORTANT)
-        let ud = t * self.lin_accel()?.xy();
+        let ud = t * self.lin_accel()?.pos();
         let wd = t * self.ang_accel()?.z();
         self.vel += Vector3::new(
             ud.x,
@@ -224,24 +228,25 @@ struct LaserImage<const VFOV: usize, const HFOV: usize> {
 impl<const VFOV: usize, const HFOV: usize> SampleMeasurement for LaserImage<VFOV, HFOV> {
     fn measurement_simulation(&self, x: &RobotPose, _: &Imu, m: &OccupancyGrid) -> LaserImage<VFOV, HFOV> {
         // By assumption, M is in map units, mu
-        let up: UnitVector3<f32>     = Vector3::z_axis().new_normalize(); // By assumption of RobotPose
-        let lookat: UnitVector3<f32> = (Vector3::x_axis() * x.dir()).new_normalize();
-        let left: UnitVector3<f32>   = lookat.cross(&up).clone().new_normalize();
+        let up: Vector3<f32>     = Vector3::z_axis().into_inner(); // By assumption of RobotPose
+        let lookat: Vector3<f32> = x.dir().transform_vector(&Vector3::x_axis());
+        let left: Vector3<f32>   = lookat.cross(&up); // Will be unit vector
 
-        let m = self.hang / self.hfov;
-        let n = self.vang / self.vfov;
+        // TODO: Use inverse of m and n for better precision
+        let m = self.hang / HFOV as f32;
+        let n = self.vang / VFOV as f32;
 
         let mut outmatrix: SMatrix<f32, VFOV, HFOV> = Matrix::zeros();
 
-        for i in 0..self.hfox {
-            for j in 0..self.vfov {
-                let a = ((i - self.hfov) * m).tan(); // Might be incorrect
-                let b = ((j - self.vfov) * n).tan();
+        for i in 0..HFOV {
+            for j in 0..VFOV {
+                let a = ((i - HFOV) as f32 * m).tan(); // Might be incorrect
+                let b = ((j - VFOV) as f32 * n).tan();
 
-                let ray = lookat + (a * left + b * up - lookat).new_normalize();
+                let ray = lookat + (a * left + b * up - lookat).normalize();
 
                 // Finding the approximate distance to the nearest block
-                outmatrix.get_mut(i).get_mut(j) = m.ray_probe(
+                outmatrix[(i, j)] = m.ray_probe(
                     (
                         x,
                         ray
@@ -260,19 +265,19 @@ impl<const VFOV: usize, const HFOV: usize> SampleMeasurement for LaserImage<VFOV
             Vector3::new(0., 0., x.z),
         ).inverse();
 
-        let up: UnitVector3<f32>     = Vector3::z_axis().new_normalize(); // By assumption of RobotPose
-        let lookat: UnitVector3<f32> = (Vector3::x_axis() * x.dir()).new_normalize();
-        let left: UnitVector3<f32>   = lookat.cross(&up).clone().new_normalize();
+        let up: Vector3<f32>     = Vector3::z_axis().into_inner(); // By assumption of RobotPose
+        let lookat: Vector3<f32> = x.dir().transform_vector(&Vector3::x_axis());
+        let left: Vector3<f32>   = lookat.cross(&up); // Will be unit vector
 
-        let m = self.hang / self.hfov;
-        let n = self.vang / self.vfov;
+        let m = self.hang / HFOV as f32;
+        let n = self.vang / VFOV as f32;
 
-        for j in 0..self.vfov {
-            for i in 0..self.hfov {
-                let cnt = j * self.vfov + i;
+        for j in 0..VFOV {
+            for i in 0..HFOV {
+                let cnt = j * VFOV + i;
 
-                let a = ((i - self.hfov) * m).tan(); // Might be incorrect
-                let b = ((j - self.vfov) * n).tan();
+                let a = ((i - HFOV) as f32 * m).tan(); // Might be incorrect
+                let b = ((j - VFOV) as f32 * n).tan();
 
                 let ray = lookat + (a * left + b * up - lookat).new_normalize();
             }
